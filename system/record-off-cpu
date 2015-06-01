@@ -1,0 +1,62 @@
+#!/bin/bash
+
+opt_duration=false; opt_pid=false; opt_verbose=false
+duration=; pid=
+
+function exit_usage {
+	cat <<-EOM >&2
+		USAGE: record-off-cpu [-hv] [-d seconds] {-p PID|command}
+		
+		Collects stacks when the given process goes off cpu.
+
+		  -h This usage message.
+		  -d Stop tracing after this many seconds.
+		  -v Show perf command before executing.
+
+		__Examples__
+		  
+		Record when `ls` goes off cpu.
+		  record-off-cpu ls
+
+		Record when process 1492 goes off cpu.
+		  record-off-cpu -p 1492
+
+		For 1 second, record when process 123 goes off CPU.
+		  record-off-cpu -d 1 -p 123
+	EOM
+	exit 2
+}
+
+while getopts d:p:v opt
+do
+	case $opt in
+	d)	opt_duration=true; duration=$OPTARG ;;
+	p)	opt_pid=true; pid=$OPTARG ;;
+	v)	opt_verbose=true ;;
+	h|?)	exit_usage
+	esac
+done
+shift $((OPTIND - 1))
+
+(( UID == 0 )) || (echo "Must be run as root" >&2; false) || exit 1
+
+if ! $opt_pid && (( $# == 0 )); then
+	echo "Must set pid or command." >&2
+	exit 1
+elif $opt_pid && (( $# > 0 )); then
+	echo "Cannot set both pid and command." >&2
+	exit 1
+elif ! $opt_pid && $opt_duration; then
+	echo "Can only set duration with pid." >&2
+	exit 1
+fi
+
+$opt_pid && pid_flag="-p $pid"
+$opt_duration && trace_command="-- sleep $duration"
+(( $# > 0 )) && trace_command="-- $@"
+
+$opt_verbose && set -x
+perf record --call-graph=fp $pid_flag \
+	-e sched:sched_stat_sleep \
+	-e sched:sched_switch \
+	-e sched:sched_process_exit $trace_command
