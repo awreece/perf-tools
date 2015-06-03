@@ -58,5 +58,6 @@ $opt_duration && trace_command="-- sleep $duration"
 $opt_verbose && set -x
 perf record --call-graph=fp $pid_flag \
 	-e sched:sched_stat_sleep \
+	-e sched:sched_stat_blocked \
 	-e sched:sched_switch \
 	-e sched:sched_process_exit $trace_command
