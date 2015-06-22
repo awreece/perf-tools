@@ -39,6 +39,7 @@
 # See the tcpretrans(8) man page (in perf-tools) for more info.
 #
 # COPYRIGHT: Copyright (c) 2014 Brendan Gregg.
+# COPYRIGHT: Copyright (c) 2015 by MemSQL.
 #
 #  This program is free software; you can redistribute it and/or
 #  modify it under the terms of the GNU General Public License
@@ -73,17 +74,19 @@ local $SIG{HUP} = \&cleanup;
 $| = 1;
 
 ### options
-my ($help, $stacks, $tlp);
+my ($help, $stacks, $tlp, $wait_memory);
 GetOptions("help|h"   => \$help,
 	   "stacks|s" => \$stacks,
-	   "tlp|l" => \$tlp)
+	   "tlp|l" => \$tlp,
+           "wait_memory|w", => \$wait_memory)
 or usage();
 usage() if $help;
 
 sub usage {
-	print STDERR "USAGE: tcpretrans [-hls]\n";
+	print STDERR "USAGE: tcpretrans [-hwls]\n";
 	print STDERR "                  -h      # help message\n";
 	print STDERR "                  -l      # trace TCP tail loss probes\n";
+	print STDERR "                  -w      # trace TCP wait memory events\n";
 	print STDERR "                  -s      # print stack traces\n";
 	print STDERR "   eg,\n";
 	print STDERR "       tcpretrans         # trace TCP retransmits\n";
@@ -193,11 +196,17 @@ writeto "$$", $flock or die "ERROR: unable to write $flock.";
 writeto "nop", "current_tracer" or ldie "ERROR: disabling current_tracer.";
 my $kname_rtr = "tcpretrans_tcp_retransmit_skb";
 my $kname_tlp = "tcpretrans_tcp_send_loss_probe";
+my $kname_swm = "tcpretrans_sk_stream_wait_memory";
 create_kprobe $kname_rtr, "tcp_retransmit_skb sk=%di" or
     ldie "ERROR: creating kprobe for tcp_retransmit_skb().";;
 if ($tlp) {
 	create_kprobe $kname_tlp, "tcp_send_loss_probe sk=%di" or
 	    edie "ERROR: creating kprobe for tcp_send_loss_probe(). " .
+	         "Older kernel version?";
+}
+if ($wait_memory) {
+	create_kprobe $kname_swm, "sk_stream_wait_memory sk=%di" or
+	    edie "ERROR: creating kprobe for sk_stream_wait_memory(). " .
 	         "Older kernel version?";
 }
 if ($stacks) {
@@ -207,6 +216,9 @@ if ($stacks) {
 enable_kprobe $kname_rtr or edie "ERROR: enabling $kname_rtr probe.";
 if ($tlp) {
 	enable_kprobe $kname_tlp or edie "ERROR: enabling $kname_tlp probe.";
+}
+if ($wait_memory) {
+	enable_kprobe $kname_swm or edie "ERROR: enabling $kname_swm probe.";
 }
 map_tcp_states();
 printf "%-8s %-6s %-20s -- %-20s %-12s\n", "TIME", "PID", "LADDR:LPORT",
@@ -251,7 +263,7 @@ while (1) {
 		next unless defined $skp and $skp ne "";
 		$skp =~ s/^0x//;
 
-		my ($laddr, $lport, $raddr, $rport, $state);
+		my ($laddr, $lport, $raddr, $rport, $state, $event_type);
 		if (defined $tcp{$skp}) {
 			# convert /proc/net/tcp hex to dotted quads
 			my ($hladdr, $hlport) = split /:/, $tcp{$skp}{laddr};
@@ -268,10 +280,19 @@ while (1) {
 			$state = "-";
 		}
 
+		if ($rest =~ /$kname_rtr/) {
+			$event_type="R";
+		} elsif ($rest =~ /$kname_tlp/) {
+			$event_type="L";
+		} elsif ($rest =~ /$kname_swm/) {
+			$event_type="W";
+		} else {
+			$event_type="-";
+		}
+
 		my $now = strftime "%H:%M:%S", localtime;
 		printf "%-8s %-6s %-20s %s> %-20s %-12s\n", $now, $pid,
-		    "$laddr:$lport", $rest =~ /$kname_tlp/ ? "L" : "R",
-		    "$raddr:$rport", $state,
+		    "$laddr:$lport", $event_type, "$raddr:$rport", $state,
 	}
 }
 
@@ -290,6 +311,10 @@ sub cleanup {
 	if ($tlp) {
 		remove_kprobe $kname_tlp
 		    or print STDERR "ERROR: removing kprobe $kname_tlp\n";
+	}
+	if ($wait_memory) {
+		remove_kprobe $kname_swm
+		    or print STDERR "ERROR: removing kprobe $kname_swm\n";
 	}
 	writeto "", "trace";
 	unlink $flock;
